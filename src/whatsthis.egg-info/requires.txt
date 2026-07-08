@@ -1,0 +1,7 @@
+click>=8.1
+rich>=13.7
+ase>=3.22
+PyYAML>=6.0
+
+[:python_version < "3.11"]
+tomli>=2.0

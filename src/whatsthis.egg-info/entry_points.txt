@@ -1,0 +1,2 @@
+[console_scripts]
+wt = whatsthis.cli:main

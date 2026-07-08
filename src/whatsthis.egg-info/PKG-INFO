@@ -1,3 +1,15 @@
+Metadata-Version: 2.4
+Name: whatsthis
+Version: 0.1.0
+Summary: 計算材料科学・計算化学のファイルを1つ選ぶだけでLLMが説明してくれるCLIツール
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: click>=8.1
+Requires-Dist: rich>=13.7
+Requires-Dist: ase>=3.22
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: tomli>=2.0; python_version < "3.11"
+
 # whatsthis (wt)
 
 計算材料科学・計算化学で扱うファイルを1つ指定するだけで、LLMがそのファイルについて
