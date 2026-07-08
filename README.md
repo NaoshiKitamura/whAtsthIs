@@ -1,0 +1,77 @@
+# whatsthis (wt)
+
+計算材料科学・計算化学で扱うファイルを1つ指定するだけで、LLMがそのファイルについて
+
+- 何のファイルなのか
+- 何をしているのか
+- どのような情報が含まれているのか
+- 研究の中でどんな役割を持つのか
+
+を自動で説明してくれるCLIツールです。
+
+```bash
+wt OUTCAR
+wt vasprun.xml
+wt log.lammps
+wt train.py
+wt POSCAR
+```
+
+## 設計方針
+
+「1ファイルを理解する」ことだけに徹しています（ディレクトリ全体の解析や研究エージェント化は対象外の初期バージョンです）。
+
+処理の流れ:
+
+1. **`detect.py`** — ファイル名・拡張子・中身の先頭数バイトから、ファイルのカテゴリを判定する
+   （例: VASP OUTCAR / POSCAR、LAMMPSログ、Pythonスクリプト、CIF、など）。
+2. **`extractors/`** — カテゴリごとの専用ロジックで、ファイルから「LLMに説明を書かせるのに必要な要約情報」を抽出する。
+   巨大ファイル（数百MBのOUTCARやvasprun.xml等）はストリーム処理し、全文をメモリに載せない。
+   - `code.py`: Python/C/C++/Fortran/Bash。小さければ全文、大きければ関数・クラス・importなどの構造を抽出。
+   - `data_formats.py`: JSON/YAML/TOML/Markdown。トップレベルのキー構造や見出し構造を抽出。
+   - `structure.py`: ASEで読める構造ファイル（POSCAR/CONTCAR/CIF/XYZ/extxyz等）。原子数・元素組成・セル情報を抽出。
+   - `vasp.py`: OUTCAR/vasprun.xml。INCARパラメータ・イオンステップ数・最終エネルギー・温度推移などをストリーム抽出し、
+     MDか構造最適化か静的計算かを判定。
+   - `lammps.py`: log.lammps（thermoブロック解析）、LAMMPS入力スクリプト、LAMMPS dataファイル。
+3. **`prompts.py`** — カテゴリに応じた「重点的に説明してほしいこと」のヒントを添えてプロンプトを構築する。
+4. **`llm.py`** — ローカルの [Ollama](https://ollama.com) サーバ（デフォルト `http://localhost:11434`）を呼び出して説明文を生成する。
+   追加の依存パッケージなし（標準ライブラリの `urllib` のみ）。デフォルトモデルは `qwen2.5`。
+5. **`cli.py`** — 上記を繋ぎ、`rich` で見やすく表示する。
+
+## インストール
+
+```bash
+# 1. Ollamaをインストール（未導入の場合）: https://ollama.com
+ollama serve &            # サーバ起動（既に起動していれば不要）
+ollama pull qwen2.5       # 使用するモデルを取得（qwen2.5:14b等サイズ違いも可）
+
+# 2. whatsthis (wt) をインストール
+cd whatsthis
+pip install -e .
+```
+
+## 使い方
+
+```bash
+wt OUTCAR                        # Ollama(qwen2.5)による説明
+wt OUTCAR --no-llm               # 抽出された要約情報だけを確認（Ollama不要、動作確認用）
+wt train.py -v                   # 判定理由やLLMに送るプロンプトも表示（デバッグ用）
+wt POSCAR --model qwen2.5:14b    # 別サイズのQwenモデルを使う
+wt OUTCAR --host http://192.168.1.10:11434   # リモートのOllamaサーバを使う
+```
+
+環境変数 `WT_MODEL` / `OLLAMA_HOST` でもデフォルト値を変更できます。
+
+## 対応ファイル（初期バージョン）
+
+- **プログラミング言語**: Python, C, C++, Fortran, Bash, JSON, YAML, TOML, Markdown
+- **計算化学の構造ファイル（ASE経由）**: POSCAR, CONTCAR, CIF, XYZ, extXYZ, LAMMPS data ほか
+- **計算結果ファイル**: OUTCAR, vasprun.xml, log.lammps, LAMMPS入力スクリプト
+
+## 既知の制限・今後の拡張候補
+
+- 現時点では1ファイル単位の解析のみ（ディレクトリ全体・複数ファイルの相関解析は非対応）
+- Quantum ESPRESSO入力は簡易的な検出のみ（専用パーサ未実装）
+- 巨大ファイルは要約ベースのためLLMへ渡らない詳細情報もある
+- 将来的な拡張: ディレクトリ全体解析、不足ファイル推定、ワークフロー推定、aider連携、研究エージェント化
+# whAtsthIs
