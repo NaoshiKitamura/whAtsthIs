@@ -2,9 +2,12 @@ README.md
 pyproject.toml
 src/whatsthis/__init__.py
 src/whatsthis/cli.py
+src/whatsthis/config.py
 src/whatsthis/detect.py
+src/whatsthis/dirscan.py
 src/whatsthis/llm.py
 src/whatsthis/prompts.py
+src/whatsthis/relations.py
 src/whatsthis.egg-info/PKG-INFO
 src/whatsthis.egg-info/SOURCES.txt
 src/whatsthis.egg-info/dependency_links.txt

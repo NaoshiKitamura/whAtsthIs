@@ -1,5 +1,5 @@
 """
-設定ファイル・ドキュメント系フォーマット（JSON / YAML / TOML / Markdown）の抽出器。
+Extractor for config/document formats: JSON / YAML / TOML / Markdown.
 """
 
 from __future__ import annotations
@@ -38,13 +38,13 @@ def extract_json(path: str) -> ExtractionResult:
     try:
         data = json.loads(text)
         struct = "\n".join(_summarize_mapping(data)) if isinstance(data, dict) else _describe_value(data)
-        summary = f"トップレベルの型: {type(data).__name__}\n\n主なキーと値の型/概要:\n{struct}"
+        summary = f"Top-level type: {type(data).__name__}\n\nKeys / value types:\n{struct}"
     except json.JSONDecodeError as e:
-        warnings.append(f"JSONとしてパースできませんでした: {e}")
+        warnings.append(f"Could not parse as JSON: {e}")
         summary = head_tail(text)
 
     return ExtractionResult(
-        category_label="JSONファイル",
+        category_label="JSON file",
         summary=summary,
         raw_excerpt=head_tail(text, n_lines=30),
         warnings=warnings,
@@ -59,15 +59,15 @@ def extract_yaml(path: str) -> ExtractionResult:
         data = yaml.safe_load(text)
         if isinstance(data, dict):
             struct = "\n".join(_summarize_mapping(data))
-            summary = f"トップレベルの型: dict\n\n主なキーと値の型/概要:\n{struct}"
+            summary = f"Top-level type: dict\n\nKeys / value types:\n{struct}"
         else:
-            summary = f"トップレベルの型: {type(data).__name__}\n{_describe_value(data)}"
+            summary = f"Top-level type: {type(data).__name__}\n{_describe_value(data)}"
     except Exception as e:  # noqa: BLE001
-        warnings.append(f"YAMLとしてパースできませんでした: {e}")
+        warnings.append(f"Could not parse as YAML: {e}")
         summary = head_tail(text)
 
     return ExtractionResult(
-        category_label="YAMLファイル",
+        category_label="YAML file",
         summary=summary,
         raw_excerpt=head_tail(text, n_lines=30),
         warnings=warnings,
@@ -84,13 +84,13 @@ def extract_toml(path: str) -> ExtractionResult:
             import tomli as tomllib  # type: ignore
         data = tomllib.loads(text)
         struct = "\n".join(_summarize_mapping(data))
-        summary = f"主なキーと値の型/概要:\n{struct}"
+        summary = f"Keys / value types:\n{struct}"
     except Exception as e:  # noqa: BLE001
-        warnings.append(f"TOMLとしてパースできませんでした: {e}")
+        warnings.append(f"Could not parse as TOML: {e}")
         summary = head_tail(text)
 
     return ExtractionResult(
-        category_label="TOMLファイル",
+        category_label="TOML file",
         summary=summary,
         raw_excerpt=head_tail(text, n_lines=30),
         warnings=warnings,
@@ -106,13 +106,13 @@ def extract_markdown(path: str) -> ExtractionResult:
 
     heading_lines = [f"{h[0]} {h[1]}" for h in headings[:40]]
     parts = [
-        f"総行数: {n_lines}, 概算語数: {n_words}",
-        "見出し構造:\n  " + ("\n  ".join(heading_lines) if heading_lines else "(見出しなし)"),
-        f"リンク数: {len(links)}",
+        f"Total lines: {n_lines}, approx. word count: {n_words}",
+        "Heading structure:\n  " + ("\n  ".join(heading_lines) if heading_lines else "(no headings)"),
+        f"Link count: {len(links)}",
     ]
 
     return ExtractionResult(
-        category_label="Markdownドキュメント",
+        category_label="Markdown document",
         summary="\n\n".join(parts),
         raw_excerpt=head_tail(text, n_lines=40),
         metadata={"lines": n_lines, "words": n_words},

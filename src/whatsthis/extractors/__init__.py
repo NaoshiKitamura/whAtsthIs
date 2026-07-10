@@ -13,12 +13,12 @@ _CODE_LANG_MAP = {
 }
 
 _STRUCTURE_LABEL_MAP = {
-    Category.VASP_POSCAR: "VASP POSCAR/CONTCAR（結晶構造ファイル）",
-    Category.STRUCTURE_CIF: "CIF（結晶構造ファイル）",
-    Category.STRUCTURE_XYZ: "XYZ（分子/構造座標ファイル）",
-    Category.STRUCTURE_EXTXYZ: "extended XYZ（構造+付加情報ファイル）",
-    Category.VASP_XDATCAR: "VASP XDATCAR（MD軌跡ファイル）",
-    Category.STRUCTURE_GENERIC_ASE: "ASE対応の構造ファイル",
+    Category.VASP_POSCAR: "VASP POSCAR/CONTCAR (crystal structure file)",
+    Category.STRUCTURE_CIF: "CIF (crystal structure file)",
+    Category.STRUCTURE_XYZ: "XYZ (molecule/structure coordinate file)",
+    Category.STRUCTURE_EXTXYZ: "extended XYZ (structure + attached properties file)",
+    Category.VASP_XDATCAR: "VASP XDATCAR (MD trajectory file)",
+    Category.STRUCTURE_GENERIC_ASE: "ASE-readable structure file",
 }
 
 _ASE_FORMAT_HINT = {
@@ -52,7 +52,7 @@ def extract(path: str, detection: Detection) -> ExtractionResult:
 
     if cat in (Category.VASP_INCAR, Category.VASP_KPOINTS):
         text = read_text_safely(path)
-        label = "VASP INCAR（計算設定ファイル）" if cat == Category.VASP_INCAR else "VASP KPOINTS（k点設定ファイル）"
+        label = "VASP INCAR (calculation settings file)" if cat == Category.VASP_INCAR else "VASP KPOINTS (k-point settings file)"
         return ExtractionResult(category_label=label, summary=text)
 
     if cat in _STRUCTURE_LABEL_MAP:
@@ -67,25 +67,25 @@ def extract(path: str, detection: Detection) -> ExtractionResult:
 
     if cat == Category.QE_INPUT:
         text = read_text_safely(path)
-        return ExtractionResult(category_label="Quantum ESPRESSO 入力ファイル", summary=head_tail(text, 80))
+        return ExtractionResult(category_label="Quantum ESPRESSO input file", summary=head_tail(text, 80))
 
     if cat == Category.UNKNOWN_TEXT:
         text = read_text_safely(path)
-        # 最後の手段としてASEに構造ファイルとして読めるか試す
+        # last resort: see if ASE can read it as a structure file
         try:
-            result = structure.extract(path, "不明フォーマット（ASEで構造として読み込み試行）")
+            result = structure.extract(path, "Unknown format (attempted ASE structure read)")
             if not result.warnings:
                 return result
         except Exception:  # noqa: BLE001
             pass
         return ExtractionResult(
-            category_label="不明フォーマットのテキストファイル",
+            category_label="Unknown-format text file",
             summary=head_tail(text, 60),
-            warnings=["既知のファイル種別と一致しませんでした。テキストとしてそのまま渡しています。"],
+            warnings=["Did not match any known file category; passing raw text through as-is."],
         )
 
     return ExtractionResult(
-        category_label="不明（バイナリの可能性）",
+        category_label="Unknown (possibly binary)",
         summary="",
-        warnings=["このファイルはテキストとして読めず、対応する抽出器もありません。"],
+        warnings=["This file could not be read as text and has no matching extractor."],
     )

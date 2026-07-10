@@ -12,14 +12,13 @@ Requires-Dist: tomli>=2.0; python_version < "3.11"
 
 # whatsthis (wt)
 
-計算材料科学・計算化学で扱うファイルを1つ指定するだけで、LLMがそのファイルについて
+Point `wt` at a single file (or now, a whole directory) from a computational
+materials science / computational chemistry project, and an LLM explains:
 
-- 何のファイルなのか
-- 何をしているのか
-- どのような情報が含まれているのか
-- 研究の中でどんな役割を持つのか
-
-を自動で説明してくれるCLIツールです。
+- what kind of file it is
+- what it does
+- what information it contains
+- what role it plays in a research workflow
 
 ```bash
 wt OUTCAR
@@ -27,62 +26,102 @@ wt vasprun.xml
 wt log.lammps
 wt train.py
 wt POSCAR
+wt ./my_project_dir/     # NEW: directory mode
 ```
 
-## 設計方針
+## Design
 
-「1ファイルを理解する」ことだけに徹しています（ディレクトリ全体の解析や研究エージェント化は対象外の初期バージョンです）。
+Two modes:
 
-処理の流れ:
+- **File mode** (default when TARGET is a file): understand one file in isolation.
+- **Directory mode** (when TARGET is a directory): scan the whole tree, detect
+  likely calculation setups (VASP run, LAMMPS run, ...) and cross-file
+  references with cheap heuristics (no LLM), then ask the LLM to turn that
+  into a narrative: what the project is, the role of each file, how files
+  relate, and a suggested reading order.
 
-1. **`detect.py`** — ファイル名・拡張子・中身の先頭数バイトから、ファイルのカテゴリを判定する
-   （例: VASP OUTCAR / POSCAR、LAMMPSログ、Pythonスクリプト、CIF、など）。
-2. **`extractors/`** — カテゴリごとの専用ロジックで、ファイルから「LLMに説明を書かせるのに必要な要約情報」を抽出する。
-   巨大ファイル（数百MBのOUTCARやvasprun.xml等）はストリーム処理し、全文をメモリに載せない。
-   - `code.py`: Python/C/C++/Fortran/Bash。小さければ全文、大きければ関数・クラス・importなどの構造を抽出。
-   - `data_formats.py`: JSON/YAML/TOML/Markdown。トップレベルのキー構造や見出し構造を抽出。
-   - `structure.py`: ASEで読める構造ファイル（POSCAR/CONTCAR/CIF/XYZ/extxyz等）。原子数・元素組成・セル情報を抽出。
-   - `vasp.py`: OUTCAR/vasprun.xml。INCARパラメータ・イオンステップ数・最終エネルギー・温度推移などをストリーム抽出し、
-     MDか構造最適化か静的計算かを判定。
-   - `lammps.py`: log.lammps（thermoブロック解析）、LAMMPS入力スクリプト、LAMMPS dataファイル。
-3. **`prompts.py`** — カテゴリに応じた「重点的に説明してほしいこと」のヒントを添えてプロンプトを構築する。
-4. **`llm.py`** — ローカルの [Ollama](https://ollama.com) サーバ（デフォルト `http://localhost:11434`）を呼び出して説明文を生成する。
-   追加の依存パッケージなし（標準ライブラリの `urllib` のみ）。デフォルトモデルは `qwen2.5`。
-5. **`cli.py`** — 上記を繋ぎ、`rich` で見やすく表示する。
+Pipeline:
 
-## インストール
+1. **`detect.py`** — classify a file's category from its name, extension, and
+   (if needed) a peek at its content (e.g. VASP OUTCAR / POSCAR, LAMMPS log,
+   Python script, CIF, ...).
+2. **`extractors/`** — category-specific logic that turns a file into "just
+   enough structured summary for the LLM to write an explanation". Huge files
+   (hundreds of MB of OUTCAR / vasprun.xml) are streamed rather than loaded
+   fully into memory.
+   - `code.py`: Python/C/C++/Fortran/Bash. Small files pass through whole;
+     large ones get their structure extracted (functions, classes, imports).
+   - `data_formats.py`: JSON/YAML/TOML/Markdown. Extracts top-level key
+     structure or heading structure.
+   - `structure.py`: ASE-readable structure files (POSCAR/CONTCAR/CIF/XYZ/
+     extxyz, etc.). Extracts atom count, elemental composition, cell info.
+   - `vasp.py`: OUTCAR/vasprun.xml. Streams INCAR parameters, ionic-step
+     count, final energy, temperature history, etc., and classifies the run
+     as MD / relaxation / static.
+   - `lammps.py`: log.lammps (thermo-block parsing), LAMMPS input scripts,
+     LAMMPS data files.
+3. **`dirscan.py`** / **`relations.py`** (directory mode only) — recursively
+   list files with their detected category, and apply simple heuristics to
+   spot calculation groups (e.g. INCAR+POSCAR+OUTCAR in the same folder) and
+   script-to-file references (e.g. a Python script that opens `"POSCAR"`).
+4. **`prompts.py`** — builds the system/user prompt, with category-specific
+   hints about what to focus on, and the target answer language injected as
+   a parameter.
+5. **`llm.py`** — calls a local [Ollama](https://ollama.com) server
+   (default `http://localhost:11434`) to generate the explanation. No extra
+   dependency beyond the standard library (`urllib`). Default model:
+   `qwen3.5:9b`.
+6. **`cli.py`** — wires the above together and renders output with `rich`.
+
+## Install
 
 ```bash
-# 1. Ollamaをインストール（未導入の場合）: https://ollama.com
-ollama serve &            # サーバ起動（既に起動していれば不要）
-ollama pull qwen2.5       # 使用するモデルを取得（qwen2.5:14b等サイズ違いも可）
+# 1. Install Ollama if you haven't: https://ollama.com
+ollama serve &                # start the server (skip if already running)
+ollama pull qwen3.5:9b        # pull the default model
 
-# 2. whatsthis (wt) をインストール
+# 2. Install whatsthis (wt)
 cd whatsthis
 pip install -e .
 ```
 
-## 使い方
+## Usage
 
 ```bash
-wt OUTCAR                        # Ollama(qwen2.5)による説明
-wt OUTCAR --no-llm               # 抽出された要約情報だけを確認（Ollama不要、動作確認用）
-wt train.py -v                   # 判定理由やLLMに送るプロンプトも表示（デバッグ用）
-wt POSCAR --model qwen2.5:14b    # 別サイズのQwenモデルを使う
-wt OUTCAR --host http://192.168.1.10:11434   # リモートのOllamaサーバを使う
+wt OUTCAR                            # explain a file with Ollama (qwen3.5:9b)
+wt OUTCAR --no-llm                   # just show the extracted summary (no Ollama needed)
+wt train.py -v                       # also show detection reason / prompt sent to the LLM
+wt POSCAR --model qwen2.5:14b        # use a different model
+wt OUTCAR --host http://192.168.1.10:11434   # use a remote Ollama server
+wt ./my_project_dir/                 # explain a whole directory
+wt ./my_project_dir/ --max-files 200 # cap how many files are scanned
+
+wt OUTCAR --lang ja                  # answer in Japanese
+wt OUTCAR --lang "English"           # answer in English (also the default)
 ```
 
-環境変数 `WT_MODEL` / `OLLAMA_HOST` でもデフォルト値を変更できます。
+Defaults can also be set via environment variables (a CLI flag always wins):
 
-## 対応ファイル（初期バージョン）
+| Env var         | Meaning                        | Default                  |
+|------------------|---------------------------------|---------------------------|
+| `WT_MODEL`       | Ollama model name               | `qwen3.5:9b`              |
+| `OLLAMA_HOST`    | Ollama server URL               | `http://localhost:11434`  |
+| `WT_MAX_TOKENS`  | Max tokens for the LLM response | `4000`                    |
+| `WT_THINK`       | Enable "thinking" mode          | `false`                   |
+| `WT_LANG`        | Answer language                 | `en`                      |
+| `WT_MAX_FILES`   | Directory mode file-scan cap    | `500`                     |
 
-- **プログラミング言語**: Python, C, C++, Fortran, Bash, JSON, YAML, TOML, Markdown
-- **計算化学の構造ファイル（ASE経由）**: POSCAR, CONTCAR, CIF, XYZ, extXYZ, LAMMPS data ほか
-- **計算結果ファイル**: OUTCAR, vasprun.xml, log.lammps, LAMMPS入力スクリプト
+## Supported files
 
-## 既知の制限・今後の拡張候補
+- **Programming languages**: Python, C, C++, Fortran, Bash, JSON, YAML, TOML, Markdown
+- **Computational-chemistry structure files (via ASE)**: POSCAR, CONTCAR, CIF, XYZ, extXYZ, LAMMPS data, and more
+- **Calculation result files**: OUTCAR, vasprun.xml, log.lammps, LAMMPS input scripts
+- **Directories**: any mix of the above, with heuristic relationship detection
 
-- 現時点では1ファイル単位の解析のみ（ディレクトリ全体・複数ファイルの相関解析は非対応）
-- Quantum ESPRESSO入力は簡易的な検出のみ（専用パーサ未実装）
-- 巨大ファイルは要約ベースのためLLMへ渡らない詳細情報もある
-- 将来的な拡張: ディレクトリ全体解析、不足ファイル推定、ワークフロー推定、aider連携、研究エージェント化
+## Known limitations / future work
+
+- Directory mode's relationship detection is heuristic (filename/regex-based), not a real
+  dependency analysis; it can miss or mis-detect relationships in complex projects.
+- Quantum ESPRESSO input detection is basic (no dedicated parser yet).
+- Very large files rely on summaries, so some fine-grained detail never reaches the LLM.
+- Future ideas: missing-file inference, workflow inference, aider integration, a research agent.

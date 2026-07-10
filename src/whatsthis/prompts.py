@@ -1,12 +1,13 @@
 """
-LLMに渡すプロンプトを組み立てるモジュール。
+Builds the prompts sent to the LLM.
 
-方針:
-  - システムプロンプトで「計算材料科学に詳しいアシスタント」という役割と
-    出力フォーマットの基本方針を固定する。
-  - ユーザープロンプトには、抽出器が作った要約（summary）を渡し、
-    生の全文は渡さない（巨大ファイル対策）。
-  - カテゴリごとに「何を重点的に説明してほしいか」のヒントを追加する。
+Design:
+  - A fixed system prompt establishes the "computational materials science
+    assistant" persona and the basic output format, with the answer language
+    injected as a parameter (see config.DEFAULT_LANGUAGE / --lang).
+  - The user prompt carries the extractor's summary, not the raw file (to
+    keep large files out of the context window).
+  - Per-category hints tell the model what to focus on for that file type.
 """
 
 from __future__ import annotations
@@ -14,87 +15,143 @@ from __future__ import annotations
 from .detect import Category, Detection
 from .extractors.base import ExtractionResult
 
-SYSTEM_PROMPT = """\
-あなたは計算材料科学・計算化学の研究者を支援するアシスタントです。
-ユーザーは研究フォルダの中から1つのファイルを選び、その中身の要約（メタデータ抽出結果）を渡してきます。
-あなたの仕事は、そのファイルについて次を過不足なく、簡潔かつ具体的な日本語で説明することです。
+SYSTEM_PROMPT_TEMPLATE = """\
+You are an assistant that helps computational materials science / computational chemistry \
+researchers understand files in their research folders.
 
-- これは何のファイルか（フォーマット・生成したソフトウェア等）
-- このファイルは何をしている/何を表しているか
-- どのような情報が含まれているか
-- 研究の中でどのような役割・使われ方をするファイルか
+The user selects a single file, and you are given a summary (extracted metadata, not the \
+raw file) describing it. Your job is to explain, concisely and concretely:
 
-出力は日本語のMarkdownで、見出しや箇条書きを使い、読みやすく簡潔にまとめてください。
-渡された要約に無い情報を憶測で断定しないでください。不明な点は「不明」「情報からは判断できない」と正直に書いてください。
-専門用語は初学者にも分かるよう軽く補足しつつ、冗長にならないようにしてください。
+- What kind of file this is (format, and which software produced it)
+- What this file does / represents
+- What information it contains
+- What role it typically plays in a research workflow
+
+Respond in {language}, using Markdown with headers and bullet points where useful.
+Do not state anything as fact that isn't supported by the provided summary -- if something \
+is unclear or missing from the summary, say so explicitly ("unknown" / "cannot be determined \
+from the given information") rather than guessing confidently.
+Briefly clarify technical terms for a non-expert reader, but keep the overall explanation concise.
 """
 
 _CATEGORY_HINTS: dict[Category, str] = {
     Category.PYTHON: (
-        "これはPythonスクリプトです。次を含めてください: "
-        "(1) スクリプト全体の目的, (2) 主な関数・クラスとその役割, "
-        "(3) おおまかな実行フロー, (4) 使用している主要ライブラリとその用途, "
-        "(5) 研究のどの工程（前処理/計算実行/後処理・解析/可視化など）に使われそうか。"
+        "This is a Python script. Cover: (1) the overall purpose of the script, "
+        "(2) the main functions/classes and their roles, (3) the rough execution flow, "
+        "(4) key libraries used and what they're used for, "
+        "(5) which stage of a research workflow this likely belongs to "
+        "(preprocessing / running a calculation / postprocessing-analysis / visualization, etc.)."
     ),
-    Category.C: "Cのソースコードです。目的、主要関数、想定される用途（数値計算/ドライバ/ユーティリティ等）を説明してください。",
-    Category.CPP: "C++のソースコードです。目的、主要クラス/関数、想定される用途を説明してください。",
-    Category.FORTRAN: "Fortranのソースコードです。多くの場合、数値計算コード（第一原理計算・MD等）の一部です。module構成、主要なsubroutine/functionの役割、想定用途を説明してください。",
-    Category.BASH: "シェルスクリプトです。ジョブ投入スクリプト・ワークフロー自動化スクリプトである可能性が高いです。何を実行しているか、どんなツールを呼び出しているかを説明してください。",
-    Category.JSON: "設定ファイルまたはデータファイル(JSON)です。主要なキーの意味・用途を推測して説明してください。",
-    Category.YAML: "設定ファイル(YAML)です。主要なキーの意味・用途（CI設定、計算パラメータ、環境定義など）を推測して説明してください。",
-    Category.TOML: "設定ファイル(TOML)です。主要なキーの意味・用途（例: pyproject.toml ならPythonパッケージ設定）を説明してください。",
-    Category.MARKDOWN: "Markdownドキュメントです。README/レポート/ノート等、どんな性質の文書かを見出し構造から推測して説明してください。",
+    Category.C: "This is C source code. Explain its purpose, main functions, and likely use (numerical routine / driver / utility, etc.).",
+    Category.CPP: "This is C++ source code. Explain its purpose, main classes/functions, and likely use.",
+    Category.FORTRAN: "This is Fortran source code, likely part of a numerical simulation code (e.g. first-principles or MD). Explain module structure, key subroutines/functions, and likely use.",
+    Category.BASH: "This is a shell script, likely a job-submission or workflow-automation script. Explain what it runs and which tools it invokes.",
+    Category.JSON: "This is a JSON config/data file. Infer and explain the purpose of the main keys.",
+    Category.YAML: "This is a YAML config file. Infer and explain the purpose of the main keys (CI config, calculation parameters, environment definition, etc.).",
+    Category.TOML: "This is a TOML config file. Explain the purpose of the main keys (e.g. pyproject.toml -> Python package configuration).",
+    Category.MARKDOWN: "This is a Markdown document. Infer what kind of document it is (README / report / notes / etc.) from its heading structure.",
     Category.VASP_OUTCAR: (
-        "VASPのOUTCARファイルです。次を明確にしてください: "
-        "(1) VASPの計算結果ログであること, (2) 静的計算/構造最適化/分子動力学(MD)のどれか, "
-        "(3) 含まれる情報（エネルギー・力・応力・温度など）, "
-        "(4) この計算がどんな研究目的（構造緩和、物性計算、MDシミュレーション等）に使われるものと考えられるか。"
+        "This is a VASP OUTCAR file. Make clear: (1) that it's a VASP calculation log, "
+        "(2) whether it's a static calculation / structure relaxation / molecular dynamics (MD) run, "
+        "(3) what information is available (energy, forces, stress, temperature, etc.), "
+        "(4) what research purpose this calculation likely served (structure relaxation, property "
+        "calculation, MD simulation, etc.)."
     ),
     Category.VASP_VASPRUN: (
-        "VASPのvasprun.xmlファイルです。OUTCARと同様の情報に加え、機械可読なXML形式であることの利点"
-        "（例: pymatgen/ASE等での自動解析がしやすい）にも触れつつ説明してください。"
+        "This is a VASP vasprun.xml file. Cover the same points as OUTCAR, and also note the benefit "
+        "of its machine-readable XML format (e.g. easy to parse programmatically with pymatgen/ASE)."
     ),
     Category.VASP_POSCAR: (
-        "VASPの構造ファイル(POSCAR/CONTCAR)です。原子数、元素組成、セル情報、"
-        "構造の特徴（結晶/表面スラブ/分子/欠陥構造の可能性など、推測できる範囲で）を説明してください。"
-        "CONTCARの場合は「構造最適化やMDの最終・現在の構造を表す」ことにも触れてください。"
+        "This is a VASP structure file (POSCAR/CONTCAR). Explain the number of atoms, elemental "
+        "composition, cell information, and (as far as can be inferred) the nature of the structure "
+        "(bulk crystal / surface slab / molecule / defect structure, etc.). If it's a CONTCAR, note "
+        "that it represents the final/current structure from a relaxation or MD run."
     ),
-    Category.VASP_INCAR: "VASPの計算設定ファイル(INCAR)です。指定されているパラメータから、どんな種類の計算が意図されているか説明してください。",
-    Category.VASP_KPOINTS: "VASPのk点サンプリング設定ファイル(KPOINTS)です。どのようなk点メッシュ/サンプリング方式かを説明してください。",
-    Category.VASP_XDATCAR: "VASPのXDATCAR（原子座標の軌跡ファイル）です。MDシミュレーションや構造最適化過程の座標の時系列であることを説明してください。",
+    Category.VASP_INCAR: "This is a VASP settings file (INCAR). Based on the parameters set, explain what kind of calculation is intended.",
+    Category.VASP_KPOINTS: "This is a VASP k-point sampling settings file (KPOINTS). Explain the k-point mesh/sampling scheme.",
+    Category.VASP_XDATCAR: "This is a VASP XDATCAR file (a trajectory of atomic coordinates). Explain that it's a time series of coordinates from an MD run or relaxation.",
     Category.LAMMPS_LOG: (
-        "LAMMPSのログファイルです。次を含めてください: "
-        "(1) シミュレーションの設定（units, pair_style, アンサンブル）, "
-        "(2) thermo出力から読み取れる実行内容（何ステップ実行したか、温度・エネルギーの推移）, "
-        "(3) このログが研究の中でどう使われるか（物性評価、平衡化、生産run等）。"
+        "This is a LAMMPS log file. Cover: (1) the simulation setup (units, pair_style, ensemble), "
+        "(2) what the thermo output indicates was run (how many steps, temperature/energy trends), "
+        "(3) how this log is likely used in a research workflow (property evaluation, equilibration, "
+        "production run, etc.)."
     ),
-    Category.LAMMPS_INPUT: "LAMMPSの入力スクリプトです。シミュレーションのセットアップ（系の定義、ポテンシャル、アンサンブル、実行内容）を説明してください。",
-    Category.LAMMPS_DATA: "LAMMPSのdataファイル（原子配置・トポロジー定義ファイル）です。原子数・原子タイプ数・シミュレーションボックスサイズ等から系の規模・種類を説明してください。",
-    Category.QE_INPUT: "Quantum ESPRESSOの入力ファイルです。&CONTROL, &SYSTEM等のnamelistから、どんな計算（scf, relax, md等）を意図しているか説明してください。",
-    Category.STRUCTURE_CIF: "CIF形式の結晶構造ファイルです。組成・セル情報・対称性など、含まれる構造情報を説明してください。",
-    Category.STRUCTURE_XYZ: "XYZ形式の構造ファイルです。原子数・元素組成・（複数フレームなら）軌跡である可能性を説明してください。",
-    Category.STRUCTURE_EXTXYZ: "extended XYZ形式の構造ファイルです。座標に加えてエネルギー・力などの付加情報が含まれることが多く、機械学習ポテンシャルの訓練データ等に使われることがある点にも触れてください。",
+    Category.LAMMPS_INPUT: "This is a LAMMPS input script. Explain the simulation setup (system definition, potential, ensemble, what is executed).",
+    Category.LAMMPS_DATA: "This is a LAMMPS data file (atom configuration/topology definition). Explain the system's scale/type based on atom count, atom types, and box size.",
+    Category.QE_INPUT: "This is a Quantum ESPRESSO input file. Based on the &CONTROL, &SYSTEM, etc. namelists, explain what kind of calculation is intended (scf, relax, md, etc.).",
+    Category.STRUCTURE_CIF: "This is a CIF-format crystal structure file. Explain the structural information it contains: composition, cell info, symmetry, etc.",
+    Category.STRUCTURE_XYZ: "This is an XYZ-format structure file. Explain the number of atoms, elemental composition, and (if multiple frames) that it may be a trajectory.",
+    Category.STRUCTURE_EXTXYZ: "This is an extended-XYZ structure file. Note that, beyond coordinates, it often carries extra info like energies/forces, and is commonly used as machine-learning potential training data.",
 }
 
 
-def build_prompt(filename: str, detection: Detection, extraction: ExtractionResult) -> tuple[str, str]:
+def build_prompt(filename: str, detection: Detection, extraction: ExtractionResult, language: str) -> tuple[str, str]:
     hint = _CATEGORY_HINTS.get(detection.category, "")
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(language=language)
 
     parts = [
-        f"# 対象ファイル\n`{filename}`",
-        f"# 検出されたカテゴリ\n{extraction.category_label}\n(判定理由: {detection.reason})",
+        f"# Target file\n`{filename}`",
+        f"# Detected category\n{extraction.category_label}\n(reason: {detection.reason})",
     ]
     if hint:
-        parts.append(f"# このカテゴリで特に説明してほしいこと\n{hint}")
+        parts.append(f"# What to focus on for this category\n{hint}")
 
-    parts.append(f"# 抽出された要約情報\n```\n{extraction.summary}\n```")
+    parts.append(f"# Extracted summary\n```\n{extraction.summary}\n```")
 
     if extraction.raw_excerpt:
-        parts.append(f"# 生テキストの抜粋（参考・全文ではない）\n```\n{extraction.raw_excerpt}\n```")
+        parts.append(f"# Raw text excerpt (for reference; not the full file)\n```\n{extraction.raw_excerpt}\n```")
 
     if extraction.warnings:
         w = "\n".join(f"- {w}" for w in extraction.warnings)
-        parts.append(f"# 抽出時の注意点\n{w}")
+        parts.append(f"# Caveats from extraction\n{w}")
 
     user_prompt = "\n\n".join(parts)
-    return SYSTEM_PROMPT, user_prompt
+    return system_prompt, user_prompt
+
+
+# --- Directory-analysis mode ---
+
+DIRECTORY_SYSTEM_PROMPT_TEMPLATE = """\
+You are an assistant that helps computational materials science / computational chemistry \
+researchers understand a folder of files -- which they may not have created themselves \
+(e.g. handed off by a collaborator, or an old project being revisited).
+
+You are given:
+- A directory tree listing (relative path, detected category, file size)
+- Short, automatically generated notes about detected calculation setups \
+(e.g. "this looks like a VASP run directory")
+- Notes about which scripts appear to reference which other files
+
+Your job is to explain, in {language}, using Markdown with headers and bullet points:
+- What kind of research project or calculation workflow this directory represents
+- The role of each major file or group of files
+- How the files relate to each other (inputs -> outputs, scripts -> data, etc.)
+- A suggested reading order / entry point for someone new to this folder
+
+Do not invent facts beyond what the provided information supports. If something is unclear, \
+say so explicitly rather than guessing confidently. Keep the explanation concise but complete.
+"""
+
+
+def build_directory_prompt(
+    root_label: str,
+    tree_lines: list[str],
+    relation_notes: list[str],
+    language: str,
+    truncated: bool = False,
+) -> tuple[str, str]:
+    system_prompt = DIRECTORY_SYSTEM_PROMPT_TEMPLATE.format(language=language)
+
+    parts = [
+        f"# Root directory\n`{root_label}`",
+        "# File tree (relative_path : category : size)\n```\n" + "\n".join(tree_lines) + "\n```",
+    ]
+    if truncated:
+        parts.append("# Note\nThe file listing was truncated (too many files); the tree above is only a subset.")
+    if relation_notes:
+        parts.append("# Automatically detected relationships / hints\n" + "\n".join(f"- {n}" for n in relation_notes))
+    else:
+        parts.append("# Automatically detected relationships / hints\n(none detected)")
+
+    user_prompt = "\n\n".join(parts)
+    return system_prompt, user_prompt

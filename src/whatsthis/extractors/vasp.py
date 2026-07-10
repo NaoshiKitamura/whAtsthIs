@@ -1,10 +1,9 @@
 """
-VASPの計算結果ファイル（OUTCAR / vasprun.xml）専用の抽出器。
+Extractor for VASP result files (OUTCAR / vasprun.xml).
 
-方針:
-  OUTCARやvasprun.xmlは数百MBになることがあるため、
-  ファイル全体をメモリに載せず1行/1要素ずつストリーム処理し、
-  必要な統計・最終状態のみを抽出する。
+OUTCAR and vasprun.xml can be hundreds of MB, so both are processed as a
+stream (line-by-line / iterparse) rather than loaded fully into memory; only
+the statistics and final-state values needed for the summary are kept.
 """
 
 from __future__ import annotations
@@ -29,14 +28,14 @@ _NIONS_RE = re.compile(r"NIONS\s*=\s*(\d+)")
 
 def _ibrion_nsw_description(ibrion, nsw) -> str:
     if ibrion is None or nsw is None:
-        return "IBRION/NSWが検出できず、静的計算かMD/構造最適化かは判別できませんでした。"
+        return "IBRION/NSW could not be detected, so it's unclear whether this is a static, relaxation, or MD run."
     if nsw == 0:
-        return f"NSW=0 のため、構造は動かさない静的（single-point）計算です。"
+        return "NSW=0, so this is a static (single-point) calculation with no ionic motion."
     if ibrion == 0:
-        return f"IBRION=0, NSW={nsw} のため、これは分子動力学（AIMD）計算です。"
+        return f"IBRION=0, NSW={nsw}: this is an ab initio molecular dynamics (AIMD) run."
     if ibrion in (1, 2, 3):
-        return f"IBRION={ibrion}, NSW={nsw} のため、これは構造最適化（ジオメトリ緩和）計算です。"
-    return f"IBRION={ibrion}, NSW={nsw}（判別が難しい設定です）。"
+        return f"IBRION={ibrion}, NSW={nsw}: this is a geometry/structure relaxation run."
+    return f"IBRION={ibrion}, NSW={nsw} (an unusual combination; hard to classify automatically)."
 
 
 def extract_outcar(path: str) -> ExtractionResult:
@@ -88,33 +87,33 @@ def extract_outcar(path: str) -> ExtractionResult:
     ibrion = int(incar_vals["IBRION"]) if "IBRION" in incar_vals else None
     nsw = int(incar_vals["NSW"]) if "NSW" in incar_vals else None
 
-    lines = [f"ファイルサイズ: {human_size(size)}"]
-    lines.append(f"原子数 (NIONS): {nions if nions is not None else '不明'}")
-    lines.append("元素種 (POTCARから検出): " + (", ".join(dict.fromkeys(potcar_elements)) if potcar_elements else "不明"))
+    lines = [f"File size: {human_size(size)}"]
+    lines.append(f"Number of atoms (NIONS): {nions if nions is not None else 'unknown'}")
+    lines.append("Elements (detected from POTCAR): " + (", ".join(dict.fromkeys(potcar_elements)) if potcar_elements else "unknown"))
     lines.append(_ibrion_nsw_description(ibrion, nsw))
-    lines.append(f"検出されたイオンステップ数（POSITION/TOTAL-FORCEブロック）: {n_ionic_steps}")
+    lines.append(f"Detected ionic steps (POSITION/TOTAL-FORCE blocks): {n_ionic_steps}")
 
     for k in _INCAR_INT_KEYS + _INCAR_FLOAT_KEYS:
         if k in incar_vals:
             lines.append(f"  {k} = {incar_vals[k]}")
 
     if last_toten is not None:
-        lines.append(f"最終ステップの自由エネルギー (free energy TOTEN): {last_toten} eV")
+        lines.append(f"Final-step free energy (TOTEN): {last_toten} eV")
     else:
-        warnings.append("TOTENの値が検出できませんでした。")
+        warnings.append("Could not find a TOTEN value.")
 
     if n_temp_samples > 0:
-        lines.append(f"温度サンプル数: {n_temp_samples}, 先頭: {first_temp} K, 最終: {last_temp} K"
-                      "（MD計算の場合、系の温度推移を示す）")
+        lines.append(f"Temperature samples: {n_temp_samples}, first: {first_temp} K, last: {last_temp} K "
+                      "(indicates the system temperature over an MD run)")
 
     if last_stress_line:
-        lines.append(f"最終ステップの応力テンソル行 (in kB): {last_stress_line}")
+        lines.append(f"Final-step stress tensor line (in kB): {last_stress_line}")
 
     if saw_force_block:
-        lines.append("原子に働く力（Force）の情報が各イオンステップで取得可能です。")
+        lines.append("Per-atom forces are available for each ionic step.")
 
     return ExtractionResult(
-        category_label="VASP OUTCAR（計算結果ログ）",
+        category_label="VASP OUTCAR (calculation log)",
         summary="\n".join(lines),
         metadata={
             "nions": nions,
@@ -140,15 +139,11 @@ def extract_vasprun(path: str) -> ExtractionResult:
     atom_symbols: list[str] = []
     n_calculations = 0
     last_energy = None
-    last_cell = None
     last_volume = None
 
     try:
         context = ET.iterparse(path, events=("start", "end"))
-        current_calc_energy = {}
         in_incar = False
-        in_atominfo_array = False
-        atom_array_field_names: list[str] = []
 
         for event, elem in context:
             tag = _NS_STRIP_RE.sub("", elem.tag)
@@ -164,7 +159,6 @@ def extract_vasprun(path: str) -> ExtractionResult:
                     incar[name] = (elem.text or "").strip()
 
             if event == "end" and tag == "atominfo":
-                # <array name="atoms"> ... <set><rc><c>Element</c><c>1</c></rc>...
                 for arr in elem.iter():
                     arr_tag = _NS_STRIP_RE.sub("", arr.tag)
                     if arr_tag == "array" and arr.get("name") == "atoms":
@@ -178,7 +172,6 @@ def extract_vasprun(path: str) -> ExtractionResult:
 
             if event == "end" and tag == "calculation":
                 n_calculations += 1
-                # エネルギー抽出
                 for en in elem.iter():
                     en_tag = _NS_STRIP_RE.sub("", en.tag)
                     if en_tag == "i" and en.get("name") == "e_fr_energy":
@@ -186,7 +179,6 @@ def extract_vasprun(path: str) -> ExtractionResult:
                             last_energy = float((en.text or "").strip())
                         except ValueError:
                             pass
-                # 最終構造のセル・体積
                 for st in elem.iter():
                     st_tag = _NS_STRIP_RE.sub("", st.tag)
                     if st_tag == "crystal":
@@ -197,10 +189,10 @@ def extract_vasprun(path: str) -> ExtractionResult:
                                     last_volume = float((v.text or "").strip())
                                 except ValueError:
                                     pass
-                elem.clear()  # メモリ節約：処理済みのcalculationは破棄
+                elem.clear()  # free memory for already-processed calculation blocks
 
     except ET.ParseError as e:
-        warnings.append(f"XMLパース中にエラー（部分的な結果の可能性）: {e}")
+        warnings.append(f"Error while parsing XML (result may be partial): {e}")
 
     nions = len(atom_symbols)
     from collections import Counter
@@ -211,12 +203,12 @@ def extract_vasprun(path: str) -> ExtractionResult:
     ibrion_i = int(ibrion) if ibrion not in (None, "") else None
     nsw_i = int(nsw) if nsw not in (None, "") else None
 
-    lines = [f"ファイルサイズ: {human_size(size)}"]
-    lines.append(f"原子数: {nions if nions else '不明'}")
+    lines = [f"File size: {human_size(size)}"]
+    lines.append(f"Number of atoms: {nions if nions else 'unknown'}")
     if elem_counts:
-        lines.append("元素と数: " + ", ".join(f"{el}:{n}" for el, n in sorted(elem_counts.items())))
+        lines.append("Elements and counts: " + ", ".join(f"{el}:{n}" for el, n in sorted(elem_counts.items())))
     lines.append(_ibrion_nsw_description(ibrion_i, nsw_i))
-    lines.append(f"<calculation> ブロック数（≒イオンステップ数）: {n_calculations}")
+    lines.append(f"<calculation> block count (~ number of ionic steps): {n_calculations}")
 
     interesting_incar = ["ENCUT", "EDIFF", "ISMEAR", "ISPIN", "ALGO", "PREC", "LORBIT", "TEBEG", "TEEND"]
     for k in interesting_incar:
@@ -224,12 +216,12 @@ def extract_vasprun(path: str) -> ExtractionResult:
             lines.append(f"  INCAR {k} = {incar[k]}")
 
     if last_energy is not None:
-        lines.append(f"最終ステップのフリーエネルギー (e_fr_energy): {last_energy} eV")
+        lines.append(f"Final-step free energy (e_fr_energy): {last_energy} eV")
     if last_volume is not None:
-        lines.append(f"最終ステップのセル体積: {last_volume} Å^3")
+        lines.append(f"Final-step cell volume: {last_volume} A^3")
 
     return ExtractionResult(
-        category_label="VASP vasprun.xml（計算結果XML）",
+        category_label="VASP vasprun.xml (calculation result XML)",
         summary="\n".join(lines),
         metadata={
             "nions": nions,

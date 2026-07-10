@@ -1,9 +1,9 @@
 """
-ファイル種別の判定モジュール。
+File-category detection.
 
-ファイル名・拡張子・（必要なら）中身の先頭数行を見て、
-このファイルが「何のカテゴリ」に属するかを推定する。
-判定結果は extractors/ 以下の対応する抽出器へ渡される。
+Given a file path, guess which category it belongs to based on filename,
+extension, and (if needed) a peek at the first few bytes of content. The
+result is handed to the matching extractor in extractors/.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from enum import Enum, auto
 
 
 class Category(Enum):
-    # --- プログラミング言語 / 汎用テキスト ---
+    # --- Programming languages / generic text ---
     PYTHON = auto()
     C = auto()
     CPP = auto()
@@ -26,7 +26,7 @@ class Category(Enum):
     TOML = auto()
     MARKDOWN = auto()
 
-    # --- VASP 関連 ---
+    # --- VASP ---
     VASP_OUTCAR = auto()
     VASP_VASPRUN = auto()
     VASP_POSCAR = auto()       # POSCAR / CONTCAR
@@ -34,7 +34,7 @@ class Category(Enum):
     VASP_KPOINTS = auto()
     VASP_XDATCAR = auto()
 
-    # --- LAMMPS 関連 ---
+    # --- LAMMPS ---
     LAMMPS_LOG = auto()
     LAMMPS_DATA = auto()
     LAMMPS_INPUT = auto()
@@ -42,13 +42,13 @@ class Category(Enum):
     # --- Quantum ESPRESSO ---
     QE_INPUT = auto()
 
-    # --- ASE が扱える構造ファイル全般 ---
+    # --- Structure files ASE can read ---
     STRUCTURE_CIF = auto()
     STRUCTURE_XYZ = auto()
     STRUCTURE_EXTXYZ = auto()
-    STRUCTURE_GENERIC_ASE = auto()   # 上記以外でase.io.readに投げてみるもの
+    STRUCTURE_GENERIC_ASE = auto()   # anything else we try feeding to ase.io.read
 
-    # --- 不明 ---
+    # --- Unknown ---
     UNKNOWN_TEXT = auto()
     UNKNOWN_BINARY = auto()
 
@@ -56,10 +56,10 @@ class Category(Enum):
 @dataclass
 class Detection:
     category: Category
-    reason: str  # なぜそう判定したかの説明（デバッグ・透明性のため）
+    reason: str  # why we classified it this way (kept for transparency/debugging)
 
 
-# 拡張子ベースの単純なマッピング（優先度は detect() の中で制御）
+# Simple extension -> category maps. Priority between these is handled in detect().
 _CODE_EXT_MAP = {
     ".py": Category.PYTHON,
     ".c": Category.C,
@@ -92,7 +92,7 @@ _STRUCTURE_EXT_MAP = {
     ".pwo": Category.QE_INPUT,
 }
 
-# 完全一致（大文字小文字区別しない）で判定するVASP系の特別なファイル名
+# Exact (case-insensitive) filename matches for VASP's fixed-name files.
 _VASP_EXACT_NAMES = {
     "outcar": Category.VASP_OUTCAR,
     "poscar": Category.VASP_POSCAR,
@@ -109,7 +109,7 @@ _LAMMPS_LOG_PATTERNS = [
 
 
 def _sniff_head(path: str, n_bytes: int = 4096) -> str:
-    """ファイル先頭の一部をテキストとして読む（バイナリなら空文字を返す）。"""
+    """Read a small chunk from the start of a file as text (empty string if binary)."""
     try:
         with open(path, "rb") as f:
             raw = f.read(n_bytes)
@@ -119,8 +119,8 @@ def _sniff_head(path: str, n_bytes: int = 4096) -> str:
 
 
 def _looks_like_lammps_data(head: str) -> bool:
-    # LAMMPS data ファイルは1行目がコメントで、その後に
-    # "N atoms" / "N atom types" 等の行が続く
+    # LAMMPS data files start with a comment line, followed by lines like
+    # "N atoms" / "N atom types".
     return bool(re.search(r"\batoms\b", head) and re.search(r"\batom types\b", head))
 
 
@@ -138,54 +138,53 @@ def detect(path: str) -> Detection:
     ext = ext.lower()
     lower_name = filename.lower()
 
-    # 1) ファイル名の完全一致（VASP系）
+    # 1) Exact filename match (VASP fixed-name files)
     if lower_name in _VASP_EXACT_NAMES:
-        return Detection(_VASP_EXACT_NAMES[lower_name], f"ファイル名 '{filename}' がVASP標準名と一致")
+        return Detection(_VASP_EXACT_NAMES[lower_name], f"filename '{filename}' matches a standard VASP filename")
 
     # 2) vasprun.xml
     if lower_name == "vasprun.xml":
-        return Detection(Category.VASP_VASPRUN, "ファイル名が vasprun.xml")
+        return Detection(Category.VASP_VASPRUN, "filename is vasprun.xml")
 
-    # 3) LAMMPS ログ
+    # 3) LAMMPS log
     for pat in _LAMMPS_LOG_PATTERNS:
         if pat.match(lower_name):
-            return Detection(Category.LAMMPS_LOG, f"ファイル名パターン '{pat.pattern}' に一致")
+            return Detection(Category.LAMMPS_LOG, f"filename matches LAMMPS log pattern '{pat.pattern}'")
 
-    # 4) LAMMPS input script （in.* や *.lmp / *.in で中身にLAMMPSコマンドがある場合）
+    # 4) LAMMPS input script (in.* or *.lmp)
     if lower_name.startswith("in.") or ext in (".lmp",):
-        return Detection(Category.LAMMPS_INPUT, f"ファイル名/拡張子がLAMMPS入力スクリプトの慣例に一致")
+        return Detection(Category.LAMMPS_INPUT, "filename/extension matches common LAMMPS input-script conventions")
 
-    # 5) 拡張子で構造ファイル判定
+    # 5) Structure file by extension
     if ext in _STRUCTURE_EXT_MAP:
         cat = _STRUCTURE_EXT_MAP[ext]
-        return Detection(cat, f"拡張子 '{ext}' に一致")
+        return Detection(cat, f"extension '{ext}' matched")
 
-    # 6) 拡張子でプログラミング言語/汎用テキスト判定
+    # 6) Programming language / generic text by extension
     if ext in _CODE_EXT_MAP:
-        return Detection(_CODE_EXT_MAP[ext], f"拡張子 '{ext}' に一致")
+        return Detection(_CODE_EXT_MAP[ext], f"extension '{ext}' matched")
 
-    # 7) 拡張子なし or 不明拡張子 → 中身を軽く覗いて判定
+    # 7) No/unknown extension -> peek at content
     head = _sniff_head(path)
 
     if not head:
-        return Detection(Category.UNKNOWN_BINARY, "テキストとして読めなかった（バイナリの可能性）")
+        return Detection(Category.UNKNOWN_BINARY, "could not be read as text (likely binary)")
 
     if _looks_like_vasprun(head):
-        return Detection(Category.VASP_VASPRUN, "中身がVASPのXML出力に類似")
+        return Detection(Category.VASP_VASPRUN, "content resembles VASP's XML output")
 
     if lower_name.startswith("data.") or ext == ".data":
         if _looks_like_lammps_data(head):
-            return Detection(Category.LAMMPS_DATA, "ファイル名/中身がLAMMPS dataファイルに類似")
+            return Detection(Category.LAMMPS_DATA, "filename/content resembles a LAMMPS data file")
 
     if _looks_like_lammps_data(head):
-        return Detection(Category.LAMMPS_DATA, "中身がLAMMPS dataファイルの構造に類似")
+        return Detection(Category.LAMMPS_DATA, "content structure resembles a LAMMPS data file")
 
     if _looks_like_qe_input(head):
-        return Detection(Category.QE_INPUT, "中身に &control / &system が含まれQuantum ESPRESSO入力に類似")
+        return Detection(Category.QE_INPUT, "content contains &control / &system, resembling a Quantum ESPRESSO input")
 
     if ext in (".data", ".lammps"):
-        return Detection(Category.LAMMPS_DATA, f"拡張子 '{ext}' がLAMMPS関連")
+        return Detection(Category.LAMMPS_DATA, f"extension '{ext}' is LAMMPS-related")
 
-    # 8) それでも分からなければ、ASEに読ませてみる価値があるかもしれないテキスト
-    #    としてジェネリックな構造ファイル候補にする
-    return Detection(Category.UNKNOWN_TEXT, "既知のパターンに一致しない汎用テキストファイル")
+    # 8) Fall back to a generic text category
+    return Detection(Category.UNKNOWN_TEXT, "did not match any known pattern; treated as generic text")
